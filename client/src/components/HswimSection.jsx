@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHswimUpload } from "../hooks/useHswimUpload.js";
+import { generateHswimPDF } from "../utils/generateHswimPdf.js";
+import { PDF_COLUMNS, COLUMN_WEIGHTS, IMPOUNDED_COLUMNS } from "../config/sections.js";
+import { formatCell } from "../utils/formatCell.js";
 
 // ─────────────────────────────────────────────
 // Shared PDF styles (white tables, black borders, Arial)
@@ -7,39 +10,115 @@ import { useHswimUpload } from "../hooks/useHswimUpload.js";
 const PDF = {
   th: {
     background: "#fff", color: "#000", border: "1px solid #000",
-    fontFamily: "Arial, sans-serif", fontWeight: "bold", fontSize: 8,
-    padding: "3px 2px", textAlign: "center", verticalAlign: "middle",
+    fontFamily: "Arial, sans-serif", fontWeight: "800", fontSize: 7.5,
+    padding: "2px 2px", textAlign: "center", verticalAlign: "middle",
     whiteSpace: "pre-line",
   },
   td: {
     background: "#fff", color: "#000", border: "1px solid #000",
-    fontFamily: "Arial, sans-serif", fontSize: 8,
+    fontFamily: "Arial, sans-serif", fontSize: 7.5,
     padding: "2px 2px", textAlign: "center", verticalAlign: "middle",
-  },
-  label: {
-    fontFamily: "Arial, sans-serif", fontWeight: "bold",
-    fontSize: 10, color: "#000", marginBottom: 6,
   },
   sectionTitle: {
     fontFamily: "Arial, sans-serif", fontWeight: "bold",
-    fontSize: 11, color: "#000", marginBottom: 8,
+    fontSize: 10, color: "#000", marginBottom: 6,
   },
 };
 
 // ─────────────────────────────────────────────
+// distributeE — spread wideLoadE across rows
+// whose time falls in 0600-1800 (wide loads hours)
+// Result is an integer per row, total = wideLoadE
+// ─────────────────────────────────────────────
+function distributeE(hourlyRows, wideLoadE) {
+  if (!wideLoadE || !hourlyRows?.length) {
+    return hourlyRows.map(r => ({ ...r, E: r.E || 0 }));
+  }
+
+  // identify which rows fall in 0600-1800
+  const eligible = hourlyRows.map((r, i) => {
+    const t = (r.time || "").replace(/[^0-9]/g, "").slice(0, 4);
+    const hour = parseInt(t.slice(0, 2), 10);
+    return { i, eligible: hour >= 6 && hour < 18 };
+  });
+  const eligibleIdxs = eligible.filter(x => x.eligible).map(x => x.i);
+
+  if (!eligibleIdxs.length) return hourlyRows.map(r => ({ ...r, E: r.E || 0 }));
+
+  // distribute wideLoadE randomly across eligible rows
+  const dist = new Array(hourlyRows.length).fill(0);
+  let remaining = Number(wideLoadE);
+
+  // seed a simple deterministic shuffle based on row count
+  const shuffled = [...eligibleIdxs].sort((a, b) => ((a * 7 + 3) % 13) - ((b * 7 + 3) % 13));
+
+  shuffled.forEach((idx, pos) => {
+    const isLast = pos === shuffled.length - 1;
+    if (isLast) {
+      dist[idx] = remaining;
+    } else {
+      const share = Math.round(remaining / (shuffled.length - pos));
+      dist[idx] = share;
+      remaining -= share;
+    }
+  });
+
+  return hourlyRows.map((r, i) => ({ ...r, E: dist[i] }));
+}
+
+// ─────────────────────────────────────────────
+// Client-side formula mirror (hswimFormulas.js)
+// Instant live preview — no server call needed
+// ─────────────────────────────────────────────
+function enrichRow(row) {
+  return {
+    ...row,
+    X: (row.D || 0) + (row.S || 0) + (row.M || 0),
+    N: (row.D || 0) + (row.S || 0),
+    Y: (row.A || 0) + (row.Z || 0) + (row.G || 0) + (row.R || 0),
+    P: (row.Z || 0) + (row.R || 0),
+  };
+}
+
+function buildLiveSummary({ hourlyRows, manualFields, F, E }) {
+  if (!hourlyRows?.length) return null;
+  const enriched = hourlyRows.map(enrichRow);
+  const sum = key => enriched.reduce((acc, r) => acc + (r[key] || 0), 0);
+  const D = sum("D"), S = sum("S"), M = sum("M");
+  const Q = sum("Q"), A = sum("A"), Z = sum("Z"), G = sum("G"), R = sum("R");
+  const X = D + S + M, N = D + S, Y = A + Z + G + R, P = Z + R;
+  const buses         = Number(manualFields?.buses)         || 0;
+  const veh3500to7000 = Number(manualFields?.veh3500to7000) || 0;
+  const veh7000plus   = Number(manualFields?.veh7000plus)   || 0;
+  const K    = buses + veh3500to7000 + veh7000plus;
+  const eVal = Number(E) || 0;
+  const fVal = Number(F) || 0;
+  const T    = Q + X + K + eVal;
+  return {
+    Q, N, M, X, T, Y, A, Z, G, R, P, K,
+    E: eVal, F: fVal, exemptTotal: eVal + fVal,
+    B: Number(manualFields?.B) || 0,
+    L: Number(manualFields?.L) || 0,
+    buses, veh3500to7000, veh7000plus,
+  };
+}
+
+// ─────────────────────────────────────────────
 // Dropzone
 // ─────────────────────────────────────────────
-function Dropzone({ label, sublabel, file, onDrop, onClear, busy }) {
+function Dropzone({ label, sublabel, file, onDrop, onClear, busy, disabled = false }) {
   const handleDrag = useCallback((e) => { e.preventDefault(); e.stopPropagation(); }, []);
   const handleDrop = useCallback((e) => {
     e.preventDefault();
+    if (disabled) return;
     const f = e.dataTransfer.files[0];
     if (f) onDrop(f);
-  }, [onDrop]);
+  }, [onDrop, disabled]);
   const handleChange = useCallback((e) => {
+    if (disabled) return;
     const f = e.target.files[0];
     if (f) onDrop(f);
-  }, [onDrop]);
+  }, [onDrop, disabled]);
 
   if (file) {
     return (
@@ -57,14 +136,19 @@ function Dropzone({ label, sublabel, file, onDrop, onClear, busy }) {
   }
 
   return (
-    <div className="dropzone" onDragOver={handleDrag} onDrop={handleDrop}
-      onClick={() => document.getElementById(`hswim-input-${label}`).click()}>
+    <div
+      className={`dropzone${disabled ? " dropzone-disabled" : ""}`}
+      onDragOver={disabled ? undefined : handleDrag}
+      onDrop={disabled ? undefined : handleDrop}
+      onClick={() => !disabled && document.getElementById(`hswim-input-${label}`).click()}
+      style={{ opacity: disabled ? 0.45 : 1, cursor: disabled ? "not-allowed" : "pointer" }}
+    >
       <input id={`hswim-input-${label}`} type="file" accept=".xlsx,.xls,.csv"
-        style={{ display: "none" }} onChange={handleChange} />
+        style={{ display: "none" }} onChange={handleChange} disabled={disabled} />
       <div className="drop-prompt">
         <span className="drop-icon">⬆</span>
         <span className="drop-text">{label}</span>
-        <span className="drop-sub">{sublabel}</span>
+        <span className="drop-sub">{disabled ? "Upload Wide Loads first" : sublabel}</span>
       </div>
     </div>
   );
@@ -90,77 +174,82 @@ function ManualField({ label, fieldKey, value, onChange, type = "number", placeh
 }
 
 // ─────────────────────────────────────────────
-// PageWrapper — simulates one A4 landscape page
+// PageWrapper — A4 landscape page shell
 // ─────────────────────────────────────────────
-function PageWrapper({ children, pageNum, totalPages, date, reportRef }) {
-  const FOOTER_TEXT = `KeNHA/WB/MTCE/4339/2025     JUJA WEIGHBRIDGE THIKA BOUND DAILY REPORT ${date || ""}     Page ${pageNum} of ${totalPages}`;
+// PageWrapper is used both directly and via ref for PDF capture
+const PageWrapper = forwardRef(function PageWrapper({ children, pageNum, totalPages, date, settings }, ref) {
+  const docRef  = settings?.reference || "KeNHA/WB/MTCE/4339/2025";
+  const title   = settings
+    ? `${settings.name} ${settings.direction} DAILY REPORT`
+    : "JUJA WEIGHBRIDGE THIKA BOUND DAILY REPORT";
+  const SEP     = "   ";  // footer section separator
+  const FOOTER  = `${docRef}${SEP}${title} ${date || ""}${SEP}Page ${pageNum} of ${totalPages}`;
   return (
-    <div ref={reportRef} style={{
-      width: 1056, minWidth: 1056, background: "#fff",
-      boxShadow: "0 4px 24px rgba(0,0,0,0.35)",
-      padding: "28px 36px 20px", boxSizing: "border-box",
-      marginBottom: 24, position: "relative",
+    <div ref={ref} style={{
+      width: 1122, minWidth: 1122, background: "#fff",
+      boxShadow: "0 4px 24px rgba(0,0,0,0.25)",
+      padding: "18px 28px 14px", boxSizing: "border-box",
+      marginBottom: 24,
     }}>
       {/* Logo */}
-      <div style={{ marginBottom: 12 }}>
-        <img src="/danka-logo.png" alt="Danka" style={{ height: 48, objectFit: "contain" }} />
+      <div style={{ marginBottom: 8 }}>
+        <img src="/danka-logo.png" alt="Danka" style={{ height: 40, objectFit: "contain" }} />
       </div>
 
       {children}
 
       {/* Footer */}
-      <div style={{ marginTop: 14, paddingTop: 5, fontFamily: "Arial, sans-serif", fontSize: 8, color: "#000", textAlign: "center", fontWeight: "bold" }}>
-        {FOOTER_TEXT}
+      <div style={{ marginTop: 10, paddingTop: 4, fontFamily: "Arial, sans-serif", fontSize: 8, color: "#000", textAlign: "center", fontWeight: "bold", letterSpacing: "0.01em" }}>
+        {FOOTER}
       </div>
     </div>
   );
-}
+});
 
 // ─────────────────────────────────────────────
 // Page 1 — Daily and Hourly Statistics
+// hourlyRows already have E distributed by caller
 // ─────────────────────────────────────────────
-function Page1({ rows, date, preparedBy, approvedBy }) {
+const Page1 = forwardRef(function Page1({ rows, date, preparedBy, approvedBy, settings }, ref) {
   if (!rows?.length) return null;
 
   const numKeys = ["D","S","M","H","Q","X","C","Y","P","A","Z","G","R","E"];
   const totals = {};
   numKeys.forEach(k => { totals[k] = rows.reduce((s, r) => s + (r[k] || 0), 0); });
 
-  const th = { ...PDF.th, borderTop: "1px solid #000", borderLeft: "1px solid #000", borderRight: "1px solid #000" };
-  const td = { ...PDF.td,  borderLeft: "1px solid #000", borderTop: "1px solid #000", borderRight: "1px solid #000" };
-  const tdB = { ...td, fontWeight: "bold", borderBottom: "1px solid #000", borderRight: "1px solid #000" };
-  
+  const th  = { ...PDF.th, fontSize: 7, padding: "1px 1px" };
+  const td  = { ...PDF.td, fontSize: 7, padding: "1px 1px" };
+  const tdB = { ...td, fontWeight: "bold" };
 
   return (
-    <PageWrapper pageNum={1} totalPages={3} date={date}>
-      {/* Report title */}
+    <PageWrapper ref={ref} pageNum={1} totalPages={3} date={date} settings={settings}>
       <div style={{ textAlign: "center", fontFamily: "Arial, sans-serif", fontWeight: "bold", fontSize: 13, color: "#000", marginBottom: 10, textDecoration: "underline" }}>
-        JUJA WEIGHBRIDGE THIKA BOUND DAILY REPORT
+        {settings
+          ? `${settings.name} ${settings.direction} DAILY REPORT`
+          : "JUJA WEIGHBRIDGE THIKA BOUND DAILY REPORT"}
       </div>
-
-      <div style={{ ...PDF.sectionTitle }}>1.&nbsp; DAILY AND HOURLY STATISTICS</div>
+      <div style={PDF.sectionTitle}>1.&nbsp; DAILY AND HOURLY STATISTICS</div>
 
       <table style={{ borderCollapse: "collapse", tableLayout: "fixed", width: "100%" }}>
         <colgroup>
-          <col style={{ width: "6%" }} />   {/* DATE */}
-          <col style={{ width: "6%" }} />   {/* TIME */}
-          <col style={{ width: "4.5%" }} /> {/* D */}
-          <col style={{ width: "4%" }} />   {/* S */}
-          <col style={{ width: "4%" }} />   {/* M */}
-          <col style={{ width: "4.5%" }} /> {/* H */}
-          <col style={{ width: "4.5%" }} /> {/* Q */}
-          <col style={{ width: "4.5%" }} /> {/* X */}
-          <col style={{ width: "4.5%" }} /> {/* C */}
-          <col style={{ width: "5%" }} />   {/* Y */}
-          <col style={{ width: "5%" }} />   {/* P */}
-          <col style={{ width: "5%" }} />   {/* A */}
-          <col style={{ width: "5%" }} />   {/* Z */}
-          <col style={{ width: "5%" }} />   {/* G */}
-          <col style={{ width: "5%" }} />   {/* R */}
-          <col style={{ width: "6%" }} />   {/* E */}
+          <col style={{ width: "6%" }} />
+          <col style={{ width: "6%" }} />
+          <col style={{ width: "4.5%" }} />
+          <col style={{ width: "4%" }} />
+          <col style={{ width: "4%" }} />
+          <col style={{ width: "4.5%" }} />
+          <col style={{ width: "4.5%" }} />
+          <col style={{ width: "4.5%" }} />
+          <col style={{ width: "4.5%" }} />
+          <col style={{ width: "5%" }} />
+          <col style={{ width: "5%" }} />
+          <col style={{ width: "5%" }} />
+          <col style={{ width: "5%" }} />
+          <col style={{ width: "5%" }} />
+          <col style={{ width: "5%" }} />
+          <col style={{ width: "6%" }} />
         </colgroup>
         <thead>
-          {/* Row 1: group header + outer column names */}
           <tr>
             <th rowSpan={3} style={{ ...th, verticalAlign: "middle" }}>DATE</th>
             <th rowSpan={3} style={{ ...th, verticalAlign: "middle" }}>TIME</th>
@@ -174,7 +263,6 @@ function Page1({ rows, date, preparedBy, approvedBy }) {
             <th rowSpan={3} style={th}>{"REDISTRI-\nBUTED\n(R)"}</th>
             <th rowSpan={3} style={th}>{"EXEMPTION\nPERMITS\nNOT\nWEIGHED\n(E)"}</th>
           </tr>
-          {/* Row 2: sub-column names */}
           <tr>
             <th style={th}>{"MULTIDECK\nSCALE"}</th>
             <th style={th}>{"WEIGHED\nSAW"}</th>
@@ -183,7 +271,6 @@ function Page1({ rows, date, preparedBy, approvedBy }) {
             <th style={th}>{"HSWIM –\nCLEARED"}</th>
             <th style={th}>{"TOTAL\nWEIGHED"}</th>
           </tr>
-          {/* Row 3: key labels */}
           <tr>
             <th style={th}>(D)</th>
             <th style={th}>(S)</th>
@@ -211,7 +298,7 @@ function Page1({ rows, date, preparedBy, approvedBy }) {
               <td style={td}>{row.Z}</td>
               <td style={td}>{row.G}</td>
               <td style={td}>{row.R}</td>
-              <td style={td}>{row.E}</td>
+              <td style={td}>{row.E ?? 0}</td>
             </tr>
           ))}
           <tr>
@@ -222,17 +309,16 @@ function Page1({ rows, date, preparedBy, approvedBy }) {
         </tbody>
       </table>
 
-      {/* Prepared / Approved */}
       <div style={{ marginTop: 10, fontFamily: "Arial, sans-serif", fontSize: 9, color: "#000" }}>
         <div><strong>Prepared by:</strong> {preparedBy || ""}</div>
         <div><strong>Approved by:</strong> {approvedBy || ""}</div>
       </div>
     </PageWrapper>
   );
-}
+});
 
 // ─────────────────────────────────────────────
-// Canvas chart (no library)
+// Canvas line chart
 // ─────────────────────────────────────────────
 function CanvasLineChart({ rows, chartHeight }) {
   const canvasRef = useRef(null);
@@ -241,7 +327,7 @@ function CanvasLineChart({ rows, chartHeight }) {
     if (!rows?.length || !canvasRef.current) return;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
-    const CW = 580, CH = Math.max(chartHeight * 1.5, 440);
+    const CW = 580, CH = Math.max((chartHeight || 400) * 1.5, 440);
     canvas.width = CW; canvas.height = CH;
 
     const padL = 48, padR = 16, padT = 44, padB = 95;
@@ -256,39 +342,36 @@ function CanvasLineChart({ rows, chartHeight }) {
 
     const allV = series.flatMap(s => rows.map(r => Number(r[s.key]) || 0));
     const yMax = Math.ceil(Math.max(...allV, 1) / 50) * 50;
-    const toX = i => padL + (i / (rows.length - 1)) * cW;
-    const toY = v => padT + cH - (v / yMax) * cH;
+    const toX  = i => padL + (i / (rows.length - 1)) * cW;
+    const toY  = v => padT + cH - (v / yMax) * cH;
 
     ctx.clearRect(0, 0, CW, CH);
     ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, CW, CH);
-    // Chart border box
     ctx.strokeStyle = "#ccc"; ctx.lineWidth = 1;
     ctx.strokeRect(padL, padT, cW, cH);
 
-    // Title
     ctx.fillStyle = "#111"; ctx.font = "bold 17px Arial";
     ctx.textAlign = "center"; ctx.textBaseline = "top";
     ctx.fillText("Graph on Trucks Weighed per Hour", CW / 2, 10);
 
-    // Grid + Y labels
     ctx.font = "10px Arial"; ctx.textAlign = "right"; ctx.textBaseline = "middle";
     for (let v = 0; v <= yMax; v += 50) {
       const y = toY(v);
-      ctx.strokeStyle = "#cccccc"; ctx.lineWidth = 0.8;
+      ctx.strokeStyle = "#ccc"; ctx.lineWidth = 0.8;
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + cW, y); ctx.stroke();
       ctx.fillStyle = "#888"; ctx.fillText(v, padL - 5, y);
     }
 
-    // X labels
     ctx.font = "9px Arial"; ctx.fillStyle = "#555";
     ctx.textAlign = "right"; ctx.textBaseline = "top";
     rows.forEach((r, i) => {
-      const x = toX(i), y = padT + cH + 5;
-      ctx.save(); ctx.translate(x, y); ctx.rotate(-Math.PI / 4);
-      ctx.fillText(r.time || "", 0, 0); ctx.restore();
+      ctx.save();
+      ctx.translate(toX(i), padT + cH + 5);
+      ctx.rotate(-Math.PI / 4);
+      ctx.fillText(r.time || "", 0, 0);
+      ctx.restore();
     });
 
-    // Lines
     series.forEach(s => {
       ctx.strokeStyle = s.color; ctx.lineWidth = s.width; ctx.lineJoin = "round";
       ctx.beginPath();
@@ -299,10 +382,8 @@ function CanvasLineChart({ rows, chartHeight }) {
       ctx.stroke();
     });
 
-    // Legend
     const legendY = CH - 14, swatchW = 24, gap = 120;
-    const totalLegendW = series.length * gap;
-    let lx = (CW - totalLegendW) / 2;
+    let lx = (CW - series.length * gap) / 2;
     ctx.font = "11px Arial"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
     series.forEach(s => {
       ctx.strokeStyle = s.color; ctx.lineWidth = 3;
@@ -318,10 +399,11 @@ function CanvasLineChart({ rows, chartHeight }) {
 // ─────────────────────────────────────────────
 // Page 2 — Daily Hourly Data + Chart
 // ─────────────────────────────────────────────
-function Page2({ rows, date }) {
+const Page2 = forwardRef(function Page2({ rows, date, settings }, ref) {
   const tableRef = useRef(null);
   const [tableH, setTableH] = useState(400);
 
+  // Hooks before early return
   useEffect(() => {
     if (tableRef.current) {
       const h = tableRef.current.getBoundingClientRect().height;
@@ -335,17 +417,17 @@ function Page2({ rows, date }) {
   const totals = {};
   numKeys.forEach(k => { totals[k] = rows.reduce((s, r) => s + (Number(r[k]) || 0), 0); });
 
-  const th = { ...PDF.th, fontSize: 9, padding: "5px 3px", borderRight: "1px solid #000" };
-  const td = { ...PDF.td, fontSize: 9, padding: "4px 3px",borderRight: "1px solid #000" };
+  const th  = { ...PDF.th, fontSize: 9, padding: "5px 3px" };
+  const td  = { ...PDF.td, fontSize: 9, padding: "4px 3px" };
   const tdB = { ...td, fontWeight: "bold" };
 
   return (
-    <PageWrapper pageNum={2} totalPages={3} date={date}>
+    <PageWrapper ref={ref} pageNum={2} totalPages={3} date={date} settings={settings}>
       <div style={PDF.sectionTitle}>2.&nbsp;&nbsp; DAILY HOURLY DATA</div>
 
       <div style={{ display: "flex", gap: 0, alignItems: "stretch" }}>
         {/* Table */}
-        <div ref={tableRef} style={{ flex: "0 0 32%", overflowX: "hidden", boxSizing: "border-box", alignSelf: "stretch" }}>
+        <div ref={tableRef} style={{ flex: "0 0 32%", overflowX: "hidden", boxSizing: "border-box" }}>
           <table style={{ borderCollapse: "collapse", tableLayout: "fixed", width: "100%" }}>
             <colgroup>
               <col style={{ width: "28%" }} />
@@ -382,48 +464,37 @@ function Page2({ rows, date }) {
               ))}
               <tr>
                 <td style={tdB}>Total</td>
-                <td style={tdB}>{totals.N}</td>
-                <td style={tdB}>{totals.M}</td>
-                <td style={tdB}>{totals.Q}</td>
-                <td style={tdB}>{totals.X}</td>
+                {numKeys.map(k => <td key={k} style={tdB}>{totals[k]}</td>)}
               </tr>
             </tbody>
           </table>
         </div>
 
         {/* Chart */}
-         <div style={{ flex: "1 1 0", background: "#fff", padding: "8px 8px 8px 18px", display: "flex", alignItems: "center" }}>
+        <div style={{ flex: "1 1 0", background: "#fff", padding: "8px 8px 8px 18px", display: "flex", alignItems: "center" }}>
           <CanvasLineChart rows={rows} chartHeight={tableH} />
         </div>
       </div>
     </PageWrapper>
   );
-}
+});
 
 // ─────────────────────────────────────────────
 // Page 3 — Traffic Census + Daily Summary
+// Uses live-computed summary so manual fields
+// update the preview in real time
 // ─────────────────────────────────────────────
-function Page3({ summary, census, F, date }) {
+const Page3 = forwardRef(function Page3({ summary, date, settings }, ref) {
   if (!summary) return null;
-
-  const s = { ...summary, F: F ?? 0 };
-  const eF = Number(s.F) || 0;
-  const eE = Number(s.E) || 0;
-  s.exemptTotal = eE + eF;
-
-  const buses         = Number(census?.buses)          || 0;
-  const veh3500to7000 = Number(census?.veh3500to7000)  || 0;
-  const veh7000plus   = Number(census?.veh7000plus)    || 0;
-  const K             = buses + veh3500to7000 + veh7000plus;
 
   const th = PDF.th;
   const td = PDF.td;
 
   return (
-    <PageWrapper pageNum={3} totalPages={3} date={date}>
+    <PageWrapper ref={ref} pageNum={3} totalPages={3} date={date} settings={settings}>
 
       {/* ── 3. TRAFFIC CENSUS DATA ── */}
-      <div style={PDF.sectionTitle}>3.&nbsp;&nbsp; TRAFFIC CENSUS DATA</div>
+      <div style={{ ...PDF.sectionTitle, marginTop: 0 }}>3.&nbsp;&nbsp; TRAFFIC CENSUS DATA</div>
       <table style={{ borderCollapse: "collapse", tableLayout: "fixed", width: "100%", marginBottom: 24 }}>
         <colgroup>
           <col style={{ width: "14%" }} />
@@ -447,13 +518,13 @@ function Page3({ summary, census, F, date }) {
         </thead>
         <tbody>
           <tr>
-            <td style={td}>{buses.toLocaleString()}</td>
-            <td style={td}>{veh3500to7000.toLocaleString()}</td>
-            <td style={td}>{veh7000plus.toLocaleString()}</td>
-            <td style={td}>{K.toLocaleString()}</td>
-            <td style={td}>{eE}</td>
-            <td style={td}>{s.X ?? 0}</td>
-            <td style={td}>{s.T ?? 0}</td>
+            <td style={td}>{(summary.buses || 0).toLocaleString()}</td>
+            <td style={td}>{(summary.veh3500to7000 || 0).toLocaleString()}</td>
+            <td style={td}>{(summary.veh7000plus || 0).toLocaleString()}</td>
+            <td style={td}>{(summary.K || 0).toLocaleString()}</td>
+            <td style={td}>{summary.E ?? 0}</td>
+            <td style={td}>{summary.X ?? 0}</td>
+            <td style={td}>{summary.T ?? 0}</td>
           </tr>
         </tbody>
       </table>
@@ -504,33 +575,328 @@ function Page3({ summary, census, F, date }) {
         </thead>
         <tbody>
           <tr>
-            <td style={td}>{s.Q ?? 0}</td>
-            <td style={td}>{s.N ?? 0}</td>
-            <td style={td}>{s.M ?? 0}</td>
-            <td style={td}>{s.X ?? 0}</td>
-            <td style={td}>{s.T ?? 0}</td>
-            <td style={td}>{s.Y ?? 0}</td>
-            <td style={td}>{s.A ?? 0}</td>
-            <td style={td}>{s.Z ?? 0}</td>
-            <td style={td}>{s.G ?? 0}</td>
-            <td style={td}>{s.R ?? 0}</td>
-            <td style={td}>{s.P ?? 0}</td>
-            <td style={td}>{s.B ?? 0}</td>
-            <td style={td}>{s.L ?? 0}</td>
-            <td style={td}>{eE}</td>
-            <td style={td}>{eF}</td>
-            <td style={td}>{s.exemptTotal}</td>
+            <td style={td}>{summary.Q ?? 0}</td>
+            <td style={td}>{summary.N ?? 0}</td>
+            <td style={td}>{summary.M ?? 0}</td>
+            <td style={td}>{summary.X ?? 0}</td>
+            <td style={td}>{summary.T ?? 0}</td>
+            <td style={td}>{summary.Y ?? 0}</td>
+            <td style={td}>{summary.A ?? 0}</td>
+            <td style={td}>{summary.Z ?? 0}</td>
+            <td style={td}>{summary.G ?? 0}</td>
+            <td style={td}>{summary.R ?? 0}</td>
+            <td style={td}>{summary.P ?? 0}</td>
+            <td style={td}>{summary.B ?? 0}</td>
+            <td style={td}>{summary.L ?? 0}</td>
+            <td style={td}>{summary.E ?? 0}</td>
+            <td style={td}>{summary.F ?? 0}</td>
+            <td style={td}>{summary.exemptTotal ?? 0}</td>
           </tr>
         </tbody>
       </table>
     </PageWrapper>
+  );
+});
+
+
+// ─────────────────────────────────────────────
+// TransgressionsPage — Page 4
+// Editable table for daily transgressions data.
+// Rows are added manually by the user.
+// ─────────────────────────────────────────────
+const TRANSGRESSION_COLS = [
+  { key: "date",         label: "Date",                width: "8%"  },
+  { key: "time",         label: "Time",                width: "6%"  },
+  { key: "regNo",        label: "Reg No",              width: "8%"  },
+  { key: "axleConfig",   label: "Axle Config",         width: "6%"  },
+  { key: "transporter",  label: "Transporter",         width: "12%" },
+  { key: "censusCLerk",  label: "Census Clerk",        width: "9%"  },
+  { key: "policeCharge", label: "Police In charge",    width: "9%"  },
+  { key: "actionTaken",  label: "Action Taken",        width: "9%"  },
+  { key: "caught",       label: "Caught",              width: "7%"  },
+  { key: "nextWBSent",   label: "Next WB report sent", width: "10%" },
+  { key: "nextWB",       label: "Next WB",             width: "7%"  },
+];
+
+function emptyRow() {
+  return Object.fromEntries(TRANSGRESSION_COLS.map(c => [c.key, ""]));
+}
+
+function TransgressionsPage({ rows, onRowChange, onAddRow, onRemoveRow, date, settings, pageRef }) {
+  const th = {
+    background: "#fff", color: "#000", border: "1px solid #000",
+    fontFamily: "Arial, sans-serif", fontWeight: "bold", fontSize: 8,
+    padding: "4px 3px", textAlign: "center", verticalAlign: "middle",
+    whiteSpace: "pre-line",
+  };
+  const td = {
+    background: "#fff", color: "#000", border: "1px solid #000",
+    fontFamily: "Arial, sans-serif", fontSize: 8,
+    padding: "2px 3px", textAlign: "center", verticalAlign: "middle",
+  };
+
+  const displayRows = rows.length === 0
+    ? [{ ...emptyRow(), date: "NIL" }]
+    : rows;
+
+  return (
+    <div>
+      {/* Edit controls — hidden in PDF capture */}
+      <div className="no-print" style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+        <span style={{ color: "#94a3b8", fontSize: 11 }}>Transgressions</span>
+        <button
+          onClick={onAddRow}
+          style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 4, color: "#4ade80", padding: "4px 12px", fontSize: 11, cursor: "pointer" }}
+        >
+          + Add Row
+        </button>
+        {rows.length > 0 && (
+          <button
+            onClick={() => onRemoveRow(rows.length - 1)}
+            style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 4, color: "#f87171", padding: "4px 12px", fontSize: 11, cursor: "pointer" }}
+          >
+            − Remove Last
+          </button>
+        )}
+      </div>
+
+      {/* Inline edit fields — hidden in PDF capture */}
+      {rows.length > 0 && (
+        <div className="no-print" style={{ marginBottom: 12 }}>
+          {rows.map((row, ri) => (
+            <div key={ri} style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6, padding: "8px", background: "#1e293b", borderRadius: 6 }}>
+              <span style={{ color: "#94a3b8", fontSize: 10, width: "100%", marginBottom: 4 }}>Row {ri + 1}</span>
+              {TRANSGRESSION_COLS.map(col => (
+                <div key={col.key} style={{ display: "flex", flexDirection: "column", minWidth: 80 }}>
+                  <label style={{ color: "#64748b", fontSize: 9, marginBottom: 2 }}>{col.label.replace("\n", " ")}</label>
+                  <input
+                    value={row[col.key] || ""}
+                    onChange={e => onRowChange(ri, col.key, e.target.value)}
+                    style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 3, color: "#e2e8f0", fontSize: 10, padding: "3px 6px", width: "100%" }}
+                  />
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* A4 preview */}
+      <PageWrapper ref={pageRef} pageNum={4} totalPages={4} date={date} settings={settings}>
+        <div style={{ fontFamily: "Arial, sans-serif", fontWeight: "bold", fontSize: 11, color: "#000", marginBottom: 8 }}>
+          5.&nbsp;&nbsp; TRANSGRESSIONS
+        </div>
+        <div style={{ fontFamily: "Arial, sans-serif", fontWeight: "bold", fontSize: 10, color: "#000", marginBottom: 6, textDecoration: "underline" }}>
+          DAILY TRANSGRESSIONS REPORT
+        </div>
+        <table style={{ borderCollapse: "collapse", tableLayout: "fixed", width: "100%" }}>
+          <colgroup>
+            {TRANSGRESSION_COLS.map((col, i) => <col key={i} style={{ width: col.width }} />)}
+          </colgroup>
+          <thead>
+            <tr>
+              {TRANSGRESSION_COLS.map(col => (
+                <th key={col.key} style={th}>{col.label}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {displayRows.map((row, ri) => (
+              <tr key={ri}>
+                {TRANSGRESSION_COLS.map(col => (
+                  <td key={col.key} style={td}>{row[col.key] || ""}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </PageWrapper>
+    </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────
+// WideLoadsPages — renders wide loads rows as
+// A4 pages (VEHICLE INSPECTION REPORT section)
+// Chunked: up to ROWS_PER_PAGE rows per page
+// ─────────────────────────────────────────────
+const WIDE_ROWS_PER_PAGE = 5;
+
+function WideLoadsPages({ result, settings, pageRefs }) {
+  if (!result?.allRows?.length) return null;
+  const allRows = result.allRows ?? result.previewRows ?? [];
+  const chunks  = [];
+  for (let i = 0; i < allRows.length; i += WIDE_ROWS_PER_PAGE) {
+    chunks.push(allRows.slice(i, i + WIDE_ROWS_PER_PAGE));
+  }
+
+  const totalPages = chunks.length;
+  const th = {
+    background: "#fff", color: "#000", border: "1px solid #000",
+    fontFamily: "Arial, sans-serif", fontWeight: "800", fontSize: 7,
+    padding: "0", textAlign: "center", verticalAlign: "bottom",
+    height: 72, overflow: "hidden",
+  };
+  const td = {
+    background: "#fff", color: "#000", border: "1px solid #000",
+    fontFamily: "Arial, sans-serif", fontSize: 7,
+    padding: "0", textAlign: "center", verticalAlign: "middle",
+    overflow: "hidden",
+  };
+  // Inline style for td content wrapper — rotated same as headers
+  const tdInner = {
+    writingMode: "vertical-lr",
+    transform: "rotate(180deg)",
+    display: "inline-block",
+    padding: "4px 2px",
+    fontSize: 7,
+    fontFamily: "Arial, sans-serif",
+    whiteSpace: "normal",
+    wordBreak: "break-word",
+    maxHeight: 120,
+    textAlign: "left",
+  };
+
+  // Compute column widths proportionally
+  const totalWeight = PDF_COLUMNS.reduce((s, col) => s + (COLUMN_WEIGHTS[col.key] ?? 1.5), 0);
+
+  return (
+    <>
+      {chunks.map((chunk, ci) => (
+        <PageWrapper
+          key={ci}
+          ref={el => { if (pageRefs) pageRefs.current[ci] = el; }}
+          pageNum={ci + 1}
+          totalPages={totalPages}
+          settings={settings}
+        >
+          {ci === 0 && (
+            <div style={{ fontFamily: "Arial, sans-serif", fontWeight: "bold", fontSize: 11, color: "#000", marginBottom: 8, textDecoration: "underline" }}>
+              7.&nbsp;&nbsp; VEHICLE INSPECTION REPORT (WIDE LOADS)
+            </div>
+          )}
+          <table style={{ borderCollapse: "collapse", tableLayout: "fixed", width: "100%" }}>
+            <colgroup>
+              {PDF_COLUMNS.map((col) => (
+                <col key={col.key} style={{ width: `${((COLUMN_WEIGHTS[col.key] ?? 1.5) / totalWeight * 100).toFixed(1)}%` }} />
+              ))}
+            </colgroup>
+            <thead>
+              <tr>
+                {PDF_COLUMNS.map(col => (
+                  <th key={col.key} style={th}>
+                    <div style={{
+                      writingMode: "vertical-lr",
+                      transform: "rotate(180deg)",
+                      display: "inline-block",
+                      padding: "3px 2px",
+                      fontSize: 7, fontWeight: 800,
+                      fontFamily: "Arial, sans-serif",
+                      whiteSpace: "pre-line",
+                      height: "100%",
+                      textAlign: "left",
+                    }}>
+                      {col.label}
+                    </div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {chunk.map((row, ri) => (
+                <tr key={ri}>
+                  {PDF_COLUMNS.map(col => (
+                    <td key={col.key} style={td}>
+                      <div style={tdInner}>
+                        {formatCell(col.key, row[col.key]) ?? ""}
+                      </div>
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </PageWrapper>
+      ))}
+    </>
+  );
+}
+
+// ─────────────────────────────────────────────
+// ImpoundedPages — renders impounded rows as
+// A4 pages (section 6)
+// ─────────────────────────────────────────────
+const IMP_ROWS_PER_PAGE = 6;
+
+function ImpoundedPages({ result, settings, pageRefs }) {
+  if (!result?.allRows?.length && !result?.rows?.length) return null;
+  const allRows = result.allRows ?? result.rows ?? [];
+  const chunks  = [];
+  for (let i = 0; i < allRows.length; i += IMP_ROWS_PER_PAGE) {
+    chunks.push(allRows.slice(i, i + IMP_ROWS_PER_PAGE));
+  }
+
+  const totalPages = chunks.length;
+  const th = {
+    background: "#fff", color: "#000", border: "1px solid #000",
+    fontFamily: "Arial, sans-serif", fontWeight: "bold", fontSize: 8,
+    padding: "4px 3px", textAlign: "center", verticalAlign: "middle",
+    whiteSpace: "pre-line",
+  };
+  const td = {
+    background: "#fff", color: "#000", border: "1px solid #000",
+    fontFamily: "Arial, sans-serif", fontSize: 8,
+    padding: "3px", textAlign: "center", verticalAlign: "middle",
+    wordBreak: "break-word",
+  };
+
+  return (
+    <>
+      {chunks.map((chunk, ci) => (
+        <PageWrapper
+          key={ci}
+          ref={el => { if (pageRefs) pageRefs.current[ci] = el; }}
+          pageNum={ci + 1}
+          totalPages={totalPages}
+          settings={settings}
+        >
+          {ci === 0 && (
+            <div style={{ fontFamily: "Arial, sans-serif", fontWeight: "bold", fontSize: 11, color: "#000", marginBottom: 8 }}>
+              6.&nbsp;&nbsp; IMPOUNDED &amp; PROHIBITED
+            </div>
+          )}
+          <table style={{ borderCollapse: "collapse", tableLayout: "fixed", width: "100%" }}>
+            <colgroup>
+              {IMPOUNDED_COLUMNS.map((col, i) => <col key={i} style={{ width: `${100 / IMPOUNDED_COLUMNS.length}%` }} />)}
+            </colgroup>
+            <thead>
+              <tr>
+                {IMPOUNDED_COLUMNS.map(col => (
+                  <th key={col.key} style={th}>{col.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {chunk.map((row, ri) => (
+                <tr key={ri}>
+                  {IMPOUNDED_COLUMNS.map(col => (
+                    <td key={col.key} style={td}>{row[col.key] ?? ""}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </PageWrapper>
+      ))}
+    </>
   );
 }
 
 // ─────────────────────────────────────────────
 // HswimSection (root export)
 // ─────────────────────────────────────────────
-export default function HswimSection({ section, onStatusChange }) {
+export default function HswimSection({ section, onStatusChange, wideLoadE = 0, wideLoadDone = false, settings, wideLoadResult = null, impoundedResult: impoundedResultProp = null }) {
   const {
     hswimFile, impoundedFile,
     hswimResult, impoundedResult,
@@ -541,13 +907,92 @@ export default function HswimSection({ section, onStatusChange }) {
     buildFinalReport,
   } = useHswimUpload(onStatusChange, section.id);
 
-  const handleGenerate = async () => {
-    const report = await buildFinalReport();
-    if (report) onStatusChange(section.id, "success", { reportData: report, ready: true });
-  };
-
   const hasHswim     = !!hswimResult;
   const hasImpounded = !!impoundedResult;
+  const F            = impoundedResult?.F ?? 0;
+
+  // ── Transgressions rows (manual entry) ───────────────────────
+  const [transgressionRows, setTransgressionRows] = useState([]);
+
+  const addTransgressionRow    = () => setTransgressionRows(prev => [...prev, emptyRow()]);
+  const removeTransgressionRow = (i) => setTransgressionRows(prev => prev.filter((_, idx) => idx !== i));
+  const updateTransgressionRow = (i, key, val) =>
+    setTransgressionRows(prev => prev.map((r, idx) => idx === i ? { ...r, [key]: val } : r));
+
+  // ── Page refs for PDF capture ─────────────────────────────────
+  const page1Ref     = useRef(null);
+  const page2Ref     = useRef(null);
+  const page3Ref     = useRef(null);
+  const page4Ref     = useRef(null);
+  // Arrays of refs for multi-page sections
+  const impPageRefs  = useRef([]);
+  const widePageRefs = useRef([]);
+
+  // ── PDF generation state ──────────────────────────────────────
+  const [pdfBusy,     setPdfBusy]     = useState(false);
+  const [pdfProgress, setPdfProgress] = useState(0);
+
+  // hourlyRowsWithE and graphRows are memoized — only recompute when
+  // the uploaded data or wideLoadE changes, NOT on every manual field keystroke.
+  // This prevents the chart height feedback loop.
+  const hourlyRowsWithE = useMemo(() => {
+    if (!hasHswim) return null;
+    return distributeE(hswimResult.reportData?.hourlyRows, wideLoadE);
+  }, [hasHswim, hswimResult, wideLoadE]);
+
+  const graphRows = useMemo(() => {
+    if (!hourlyRowsWithE) return null;
+    return hourlyRowsWithE.map(row => ({
+      time: row.time,
+      N: (row.D || 0) + (row.S || 0),
+      M: row.M || 0,
+      Q: row.Q || 0,
+      X: (row.D || 0) + (row.S || 0) + (row.M || 0),
+    }));
+  }, [hourlyRowsWithE]);
+
+  // liveSummary CAN recompute on manual field changes — it only affects
+  // Page3 text values, not the chart, so no feedback loop here.
+  const liveSummary = useMemo(() => {
+    if (!hasHswim) return null;
+    return buildLiveSummary({
+      hourlyRows: hourlyRowsWithE,
+      manualFields,
+      F,
+      E: wideLoadE,
+    });
+  }, [hasHswim, hourlyRowsWithE, manualFields, F, wideLoadE]);
+
+  const handleGenerate = async () => {
+    // Step 1: build the final server-side report data
+    const report = await buildFinalReport(wideLoadE);
+    if (!report) return;
+    onStatusChange(section.id, "success", { reportData: report, ready: true });
+
+    // Step 2: generate PDF from page refs
+    setPdfBusy(true);
+    setPdfProgress(0);
+    try {
+      const date     = manualFields.date || "";
+      const filename = `HSWIM_report_${date.replace(/\//g, "-") || "report"}`;
+      // Collect refs in PDF page order:
+      // Page1, Page2, Page3, Page4(Transgressions),
+      // Page5+(Impounded), PageN+(Wide Loads)
+      const hswimRefs = [page1Ref, page2Ref, page3Ref, page4Ref];
+      const impRefs   = (impPageRefs.current || [])
+        .filter(Boolean)
+        .map(el => ({ current: el }));
+      const wideRefs  = (widePageRefs.current || [])
+        .filter(Boolean)
+        .map(el => ({ current: el }));
+      const allRefs   = [...hswimRefs, ...impRefs, ...wideRefs];
+
+      await generateHswimPDF(allRefs, filename, setPdfProgress);
+    } finally {
+      setPdfBusy(false);
+      setPdfProgress(0);
+    }
+  };
 
   return (
     <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
@@ -555,14 +1000,32 @@ export default function HswimSection({ section, onStatusChange }) {
       {/* ── LEFT ─────────────────────────────────────── */}
       <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
 
+        {/* Wide loads gate banner */}
+        {!wideLoadDone && (
+          <div style={{
+            background: "#1e293b", border: "1px solid #f97316", borderRadius: 8,
+            padding: "12px 16px", marginBottom: 16,
+            color: "#f97316", fontSize: 12, fontWeight: 700,
+          }}>
+            ⚠ Upload the Wide Loads Report first — Exemption Permits Not Weighed (E)
+            is derived from that row count and is required for this report.
+          </div>
+        )}
+
         <div className="section-card">
           <div className="section-header">
             <span className="section-title">HSWIM DAILY STATISTICS</span>
             {hasHswim && <span className="section-badge">✓ {hswimResult.totalRows} ROWS</span>}
             {busy && !hasHswim && <span className="section-badge section-badge-busy">UPLOADING…</span>}
+            {wideLoadDone && (
+              <span className="section-badge" style={{ color: "#4ade80", borderColor: "#4ade80" }}>
+                E = {wideLoadE} from Wide Loads
+              </span>
+            )}
           </div>
           <Dropzone label="Drop HSWIM Daily CSV / XLSX" sublabel=".csv or .xlsx · 24 hourly rows"
-            file={hswimFile} onDrop={uploadHswim} onClear={clearHswim} busy={busy} />
+            file={hswimFile} onDrop={uploadHswim} onClear={clearHswim}
+            busy={busy} disabled={!wideLoadDone} />
         </div>
 
         <div className="section-card">
@@ -572,7 +1035,8 @@ export default function HswimSection({ section, onStatusChange }) {
             {busy && !hasImpounded && <span className="section-badge section-badge-busy">UPLOADING…</span>}
           </div>
           <Dropzone label="Drop Impounded & Overloaded CSV / XLSX" sublabel=".csv or .xlsx · Vardict column required"
-            file={impoundedFile} onDrop={uploadImpounded} onClear={clearImpounded} busy={busy} />
+            file={impoundedFile} onDrop={uploadImpounded} onClear={clearImpounded}
+            busy={busy} disabled={!wideLoadDone} />
           {hasImpounded && (
             <div className="result" style={{ margin: "0 24px 16px" }}>
               <div className="result-row">
@@ -589,24 +1053,49 @@ export default function HswimSection({ section, onStatusChange }) {
 
         {error && <div className="error">⚠ {error}</div>}
 
-        {/* ── A4 PREVIEW ── */}
+        {/* ── A4 PAGE PREVIEW ── */}
         {hasHswim && (
           <div style={{ overflowX: "auto", marginTop: 16 }}>
             <Page1
-              rows={hswimResult.reportData?.hourlyRows}
+              ref={page1Ref}
+              rows={hourlyRowsWithE}
               date={manualFields.date}
               preparedBy={manualFields.preparedBy}
               approvedBy={manualFields.approvedBy}
+              settings={settings}
             />
             <Page2
-              rows={hswimResult.reportData?.graphRows}
+              ref={page2Ref}
+              rows={graphRows}
               date={manualFields.date}
+              settings={settings}
             />
             <Page3
-              summary={hswimResult.reportData?.summary}
-              census={hswimResult.reportData?.census}
-              F={impoundedResult?.F}
+              ref={page3Ref}
+              summary={liveSummary}
               date={manualFields.date}
+              settings={settings}
+            />
+            <TransgressionsPage
+              rows={transgressionRows}
+              onRowChange={updateTransgressionRow}
+              onAddRow={addTransgressionRow}
+              onRemoveRow={removeTransgressionRow}
+              date={manualFields.date}
+              settings={settings}
+              pageRef={page4Ref}
+            />
+            {/* Impounded pages — section 6 */}
+            <ImpoundedPages
+              result={impoundedResultProp}
+              settings={settings}
+              pageRefs={impPageRefs}
+            />
+            {/* Wide Loads pages — section 7, always last */}
+            <WideLoadsPages
+              result={wideLoadResult}
+              settings={settings}
+              pageRefs={widePageRefs}
             />
           </div>
         )}
@@ -616,6 +1105,12 @@ export default function HswimSection({ section, onStatusChange }) {
       <div style={{ width: 220, minWidth: 220, flexShrink: 0, background: "#0f172a", borderRadius: 8, padding: "16px 14px", position: "sticky", top: 64 }}>
         <div style={{ color: "#4ade80", fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 14, borderBottom: "1px solid #1e293b", paddingBottom: 8 }}>
           Manual Fields
+        </div>
+
+        {/* E read-only — flows from Wide Loads */}
+        <div style={{ background: "#1e293b", borderRadius: 4, padding: "6px 10px", marginBottom: 12, fontSize: 10, color: wideLoadDone ? "#4ade80" : "#475569" }}>
+          Exempt Not Weighed [E] = {wideLoadE}
+          {!wideLoadDone && <span style={{ color: "#f97316" }}> (upload wide loads first)</span>}
         </div>
 
         <div style={{ color: "#475569", fontSize: 10, letterSpacing: "0.06em", marginBottom: 8, textTransform: "uppercase" }}>Court & Compliance</div>
@@ -633,12 +1128,16 @@ export default function HswimSection({ section, onStatusChange }) {
         <ManualField label="Approved By" fieldKey="approvedBy" value={manualFields.approvedBy} onChange={updateManual} type="text" placeholder="Name" />
 
         <button
-          className={`upload-btn${!hasHswim || busy ? " upload-btn-disabled" : ""}`}
+          className={`upload-btn${!hasHswim || busy || pdfBusy ? " upload-btn-disabled" : ""}`}
           style={{ margin: "16px 0 0", width: "100%" }}
-          disabled={!hasHswim || busy}
+          disabled={!hasHswim || busy || pdfBusy}
           onClick={handleGenerate}
         >
-          {busy ? "BUILDING…" : "BUILD REPORT"}
+          {pdfBusy
+            ? `GENERATING PDF… ${pdfProgress}%`
+            : busy
+            ? "BUILDING…"
+            : "BUILD & DOWNLOAD PDF"}
         </button>
 
         {hasHswim && (

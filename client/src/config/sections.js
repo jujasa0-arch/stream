@@ -2,7 +2,6 @@
 //export const SERVER = 'http://localhost:5000';
 export const SERVER = "https://stream-production-748d.up.railway.app";
 
-
 // columns to be formatted as dates
 export const DATE_COLUMNS = [
   "Inspection Date",
@@ -87,8 +86,11 @@ export const IMPOUNDED_COLUMNS = [
 export const IMPOUNDED_NUMBER_COLUMNS = ["AxleOverload", "GVWOverload"];
 export const IMPOUNDED_DATE_COLUMNS   = ["DateWeighed"];
 
-// ✅ ONE single SECTIONS array — all sections live here
-// to add a new section in future, just add a new entry to this array
+// ── SECTIONS array ────────────────────────────────────────────
+// Add new sections here. The sidebar and routing are driven by this array.
+// special flags:
+//   custom:   true  → renders HswimSection component
+//   settings: true  → renders SettingsSection component (no upload, no status)
 export const SECTIONS = [
   {
     id:            "wide_load",
@@ -114,5 +116,10 @@ export const SECTIONS = [
     columnWeights: null,
     rotated:       false,
     custom:        true,
+  },
+  {
+    id:       "settings",
+    title:    "Settings",
+    settings: true,   // rendered as SettingsSection, no upload logic
   },
 ];

@@ -2,11 +2,7 @@ import { SECTIONS } from "../config/sections";
 
 /**
  * Sidebar navigation showing all sections and their upload status.
- * @param {Array}    sectionStates - array of { id, status } for each section
- * @param {string}   activeId      - id of the currently visible section
- * @param {function} onSelect      - called with section id when nav item clicked
- * @param {function} onGenerate    - called when Generate Report button clicked
- * @param {boolean}  canGenerate   - true when at least one section is ready
+ * Settings tab has no status dot — it's always accessible.
  */
 export default function Sidebar({
   sectionStates,
@@ -21,29 +17,29 @@ export default function Sidebar({
 
   function StatusDot({ status }) {
     const colors = {
-      success:   "#28c840",  // green  — uploaded and ready
-      uploading: "#febc2e",  // yellow — in progress
-      error:     "#ff5f57",  // red    — failed
-      idle:      "#444",     // grey   — not started
+      success:   "#28c840",
+      uploading: "#febc2e",
+      busy:      "#febc2e",
+      error:     "#ff5f57",
+      idle:      "#444",
     };
     return (
-      <span
-        style={{
-          display: "inline-block",
-          width: 8,
-          height: 8,
-          borderRadius: "50%",
-          background: colors[status] ?? colors.idle,
-          flexShrink: 0,
-        }}
-      />
+      <span style={{
+        display: "inline-block", width: 8, height: 8,
+        borderRadius: "50%", background: colors[status] ?? colors.idle,
+        flexShrink: 0,
+      }} />
     );
   }
+
+  // Sections that have upload state (exclude settings)
+  const uploadSections = SECTIONS.filter(s => !s.settings);
+  const readyCount = sectionStates.filter(s => s.status === "success").length;
 
   return (
     <aside className="sidebar">
 
-      {/* app title */}
+      {/* App title */}
       <div className="sidebar-top-bar">
         <div className="sidebar-dots">
           <span className="dot dot-red" />
@@ -58,8 +54,8 @@ export default function Sidebar({
       {/* Section navigation */}
       <nav className="sidebar-nav">
         {SECTIONS.map((section) => {
-          const status = getStatus(section.id);
-          const isActive = section.id === activeId;
+          const isActive  = section.id === activeId;
+          const isSettings = !!section.settings;
 
           return (
             <button
@@ -67,22 +63,24 @@ export default function Sidebar({
               className={`sidebar-nav-item ${isActive ? "sidebar-nav-item-active" : ""}`}
               onClick={() => onSelect(section.id)}
             >
-              <span className="sidebar-nav-label">{section.title}</span>
-              <StatusDot status={status} />
+              <span className="sidebar-nav-label">
+                {/* gear icon for settings */}
+                {isSettings ? "⚙ " : ""}{section.title}
+              </span>
+              {/* no status dot for settings tab */}
+              {!isSettings && <StatusDot status={getStatus(section.id)} />}
             </button>
           );
         })}
       </nav>
 
-      {/* Spacer pushes generate button to bottom */}
       <div style={{ flex: 1 }} />
 
       <div className="sidebar-divider" />
 
-      {/* Section readiness summary */}
+      {/* Section readiness summary — counts upload sections only */}
       <div className="sidebar-summary">
-        {sectionStates.filter((s) => s.status === "success").length} of{" "}
-        {SECTIONS.length} sections ready
+        {readyCount} of {uploadSections.length} sections ready
       </div>
 
       {/* Generate report button */}

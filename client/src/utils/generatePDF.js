@@ -9,7 +9,8 @@ import { formatCell } from "./formatCell";
  * @param {object} result - the server response object containing allRows/previewRows and filename
  */
 export function generatePDF(result) {
-  const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+  // ── A4 landscape ──────────────────────────────────────────────
+  const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
 
   const margins = { top: 30, left: 10, right: 10 };
   const cellHeight = 80;

@@ -3,14 +3,13 @@ import { useState, useCallback } from "react";
 const SERVER = "https://stream-production-748d.up.railway.app";
 
 export function useHswimUpload(onStatusChange, sectionId) {
-  const [hswimFile,      setHswimFile]      = useState(null);
-  const [impoundedFile,  setImpoundedFile]  = useState(null);
-  const [hswimResult,    setHswimResult]    = useState(null);
-  const [impoundedResult,setImpoundedResult]= useState(null);
-  const [busy,           setBusy]           = useState(false);
-  const [error,          setError]          = useState(null);
+  const [hswimFile,       setHswimFile]       = useState(null);
+  const [impoundedFile,   setImpoundedFile]   = useState(null);
+  const [hswimResult,     setHswimResult]     = useState(null);
+  const [impoundedResult, setImpoundedResult] = useState(null);
+  const [busy,            setBusy]            = useState(false);
+  const [error,           setError]           = useState(null);
 
-  // Manual fields
   const [manualFields, setManualFields] = useState({
     B: "", L: "",
     buses: "", veh3500to7000: "", veh7000plus: "",
@@ -43,7 +42,7 @@ export function useHswimUpload(onStatusChange, sectionId) {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const res = await fetch(`${SERVER}/upload/hswim`, { method: "POST", body: fd });
+      const res  = await fetch(`${SERVER}/upload/hswim`, { method: "POST", body: fd });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || "Upload failed");
       setHswimResult(data);
@@ -64,7 +63,7 @@ export function useHswimUpload(onStatusChange, sectionId) {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const res = await fetch(`${SERVER}/upload/hswim-impounded`, { method: "POST", body: fd });
+      const res  = await fetch(`${SERVER}/upload/hswim-impounded`, { method: "POST", body: fd });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || "Upload failed");
       setImpoundedResult(data);
@@ -75,27 +74,29 @@ export function useHswimUpload(onStatusChange, sectionId) {
     }
   }, []);
 
-  const buildFinalReport = useCallback(async () => {
+  // E is passed in from App.jsx (wide loads row count)
+  const buildFinalReport = useCallback(async (E = 0) => {
     if (!hswimResult) return null;
     setBusy(true);
     setError(null);
     try {
       const payload = {
-        hourlyRows: hswimResult.reportData.hourlyRows,
-        F: impoundedResult?.F ?? 0,
-        B: Number(manualFields.B) || 0,
-        L: Number(manualFields.L) || 0,
-        buses: Number(manualFields.buses) || 0,
+        hourlyRows:    hswimResult.reportData.hourlyRows,
+        F:             impoundedResult?.F ?? 0,
+        E:             Number(E) || 0,
+        B:             Number(manualFields.B)             || 0,
+        L:             Number(manualFields.L)             || 0,
+        buses:         Number(manualFields.buses)         || 0,
         veh3500to7000: Number(manualFields.veh3500to7000) || 0,
-        veh7000plus: Number(manualFields.veh7000plus) || 0,
-        preparedBy: manualFields.preparedBy,
-        approvedBy: manualFields.approvedBy,
-        date: manualFields.date,
+        veh7000plus:   Number(manualFields.veh7000plus)   || 0,
+        preparedBy:    manualFields.preparedBy,
+        approvedBy:    manualFields.approvedBy,
+        date:          manualFields.date,
       };
-      const res = await fetch(`${SERVER}/upload/hswim-combined`, {
-        method: "POST",
+      const res  = await fetch(`${SERVER}/upload/hswim-combined`, {
+        method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body:    JSON.stringify(payload),
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || "Failed to build report");
