@@ -8,13 +8,11 @@ export const DATE_COLUMNS = [
   "Date of Travel",
   "Start Date",
   "End Date",
-  "Dpermitissu",
 ];
 
 // columns to be formatted as numbers
 export const NUMBER_COLUMNS = ["weighofload", "Authweight"];
 
-// column definitions — key matches server data, label shown in PDF/table
 export const PDF_COLUMNS = [
   { key: "Inspection Date",  label: "Inspection\nDate" },
   { key: "registration",     label: "Registration" },
@@ -40,7 +38,6 @@ export const PDF_COLUMNS = [
   { key: "End Date",         label: "PEndD" },
 ];
 
-// column width weights — controls proportional width in PDF
 export const COLUMN_WEIGHTS = {
   "Inspection Date":  1.5,
   "registration":     1.5,
@@ -51,7 +48,7 @@ export const COLUMN_WEIGHTS = {
   "Axleconf":         1,
   "Inspstick":        1,
   "InsuaranceStic":   1,
-  "Cargo":            3,
+  "Cargo":            4,
   "Dpermitissu":      1.5,
   "Height":           1,
   "Length":           1,
@@ -65,8 +62,6 @@ export const COLUMN_WEIGHTS = {
   "Start Date":       1.5,
   "End Date":         1.5,
 };
-
-// ── Impounded & Prohibited columns ──────────────────────────
 
 export const IMPOUNDED_COLUMNS = [
   { key: "DateWeighed",      label: "Date Weighed/\nProhibited" },
@@ -86,15 +81,25 @@ export const IMPOUNDED_COLUMNS = [
 export const IMPOUNDED_NUMBER_COLUMNS = ["AxleOverload", "GVWOverload"];
 export const IMPOUNDED_DATE_COLUMNS   = ["DateWeighed"];
 
+// ── GROUPS ───────────────────────────────────────────────────
+// Drives the collapsible sidebar groups.
+// Each section gets a `group` field matching a group id.
+// Sections with group: "system" go under the system divider.
+export const GROUPS = [
+  { id: "daily",  label: "Daily Report" },
+  { id: "mobile", label: "Mobile Report" },
+];
+
 // ── SECTIONS array ────────────────────────────────────────────
-// Add new sections here. The sidebar and routing are driven by this array.
-// special flags:
-//   custom:   true  → renders HswimSection component
-//   settings: true  → renders SettingsSection component (no upload, no status)
+// group:    which sidebar group this belongs to
+// custom:   true → renders HswimSection component
+// settings: true → renders SettingsSection component
 export const SECTIONS = [
+  // ── Daily Report sections ─────────────────────────────────
   {
     id:            "wide_load",
-    title:         "Wide Loads Report",
+    group:         "daily",
+    title:         "Wide Loads",
     endpoint:      "/upload",
     pdfColumns:    PDF_COLUMNS,
     columnWeights: COLUMN_WEIGHTS,
@@ -102,6 +107,7 @@ export const SECTIONS = [
   },
   {
     id:            "impounded",
+    group:         "daily",
     title:         "Impounded & Prohibited",
     endpoint:      "/upload/impounded",
     pdfColumns:    IMPOUNDED_COLUMNS,
@@ -110,6 +116,7 @@ export const SECTIONS = [
   },
   {
     id:            "hswim",
+    group:         "daily",
     title:         "HSWIM Daily Report",
     endpoint:      null,
     pdfColumns:    null,
@@ -117,9 +124,23 @@ export const SECTIONS = [
     rotated:       false,
     custom:        true,
   },
+
+  // ── Mobile Report sections ────────────────────────────────
+  // Add your mobile report section configs here when ready.
+  // Example:
+  // {
+  //   id:       "mobile_stats",
+  //   group:    "mobile",
+  //   title:    "Mobile Statistics",
+  //   endpoint: "/upload/mobile",
+  //   ...
+  // },
+
+  // ── System ───────────────────────────────────────────────
   {
     id:       "settings",
+    group:    "system",
     title:    "Settings",
-    settings: true,   // rendered as SettingsSection, no upload logic
+    settings: true,
   },
 ];

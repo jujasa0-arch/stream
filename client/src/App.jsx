@@ -1,100 +1,138 @@
 import { useState, useCallback } from "react";
-
 import { SECTIONS } from "./config/sections.js";
-import { generateImpoundedPDF } from "./utils/generateImpoundedPDF.js";
-import { generatePDF } from "./utils/generatePDF.js";
 import { useSettings } from "./hooks/useSettings.js";
 import Sidebar from "./components/Sidebar.jsx";
-import UploadSection from "./components/UploadSection.jsx";
+import DailyReportView from "./components/DailyReportView.jsx";
 import HswimSection from "./components/HswimSection.jsx";
 import SettingsSection from "./components/SettingsSection.jsx";
+import { useHswimUpload } from "./hooks/useHswimUpload.js";
+
+const DAILY_IDS = ["wide_load", "impounded", "hswim"];
 
 export default function App() {
   const [sectionStates, setSectionStates] = useState(
-    SECTIONS.filter(s => !s.settings).map((s) => ({ id: s.id, status: "idle", result: null }))
+    SECTIONS.filter(s => !s.settings).map(s => ({
+      id: s.id, status: "idle", result: null,
+    }))
   );
 
-  const [activeId, setActiveId] = useState(SECTIONS[0]?.id);
 
-  // Weighbridge settings — persisted in localStorage
+  const [activeId, setActiveId]     = useState("daily");
   const { settings, updateSetting, resetSettings } = useSettings();
 
+  // Manual fields lifted here so DailyReportView + HswimSection share state
+  const [manualFields, setManualFields] = useState({
+    date: "", preparedBy: "", approvedBy: "",
+    B: 0, L: 0, buses: 0, veh3500to7000: 0, veh7000plus: 0,
+  });
+
+  const updateManual = useCallback((key, value) => {
+    setManualFields(prev => ({ ...prev, [key]: value }));
+  }, []);
+
   const handleSectionStatus = useCallback((id, status, result) => {
-    setSectionStates((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, status, result } : s))
+    setSectionStates(prev =>
+      prev.map(s => s.id === id ? { ...s, status, result } : s)
     );
   }, []);
 
-  const canGenerate = sectionStates.some((s) => s.status === "success");
+  const hswimUpload = useHswimUpload(handleSectionStatus, "hswim");
 
-  // E flows from Wide Loads row count into HSWIM
-  const wideLoadState = sectionStates.find((s) => s.id === "wide_load");
+  const canGenerate = sectionStates.some(s => s.status === "success");
+
+  const wideLoadState = sectionStates.find(s => s.id === "wide_load");
   const wideLoadDone  = wideLoadState?.status === "success";
   const wideLoadE     = wideLoadDone
     ? (wideLoadState.result?.total_rows ?? wideLoadState.result?.allRows?.length ?? 0)
     : 0;
 
-  function handleGenerate() {
-    const readySections = sectionStates.filter((s) => s.status === "success");
-    if (readySections.length > 0) {
-      const first = readySections[0];
-      if (first.id === "impounded") {
-        generateImpoundedPDF(first.result);
-      } else if (first.id !== "hswim") {
-        generatePDF(first.result);
-      }
-    }
-  }
+  function handleGenerate() { window.print(); }
 
-  function renderSection(section) {
-    if (section.settings) {
+  function renderMain() {
+    if (activeId === "settings") {
       return (
-        <SettingsSection
-          key={section.id}
-          settings={settings}
-          updateSetting={updateSetting}
-          resetSettings={resetSettings}
-        />
+        <div className="content-area">
+          <SettingsSection
+            settings={settings}
+            updateSetting={updateSetting}
+            resetSettings={resetSettings}
+          />
+        </div>
       );
     }
-    if (section.custom) {
-      return (
-        <HswimSection
-          key={section.id}
-          section={section}
-          onStatusChange={handleSectionStatus}
-          wideLoadE={wideLoadE}
-          wideLoadDone={wideLoadDone}
-          settings={settings}
-          wideLoadResult={wideLoadState?.result ?? null}
-          impoundedResult={sectionStates.find(s => s.id === "impounded")?.result ?? null}
-        />
-      );
-    }
+
     return (
-      <UploadSection
-        key={section.id}
-        section={section}
-        onStatusChange={handleSectionStatus}
-      />
+      <div style={{ flex: 1, overflow: "hidden", padding: "16px 20px", display: "flex", flexDirection: "column" }}>
+        <DailyReportView
+          sectionStates={sectionStates}
+          onStatusChange={handleSectionStatus}
+          manualFields={manualFields}
+          updateManual={updateManual}
+          settings={settings}
+          onGenerate={handleGenerate}
+          hswimUpload={hswimUpload} 
+        >
+          {/* PDF pages render inside the preview card */}
+          {wideLoadDone && (
+            <HswimSection
+              section={SECTIONS.find(s => s.id === "hswim")}
+              onStatusChange={handleSectionStatus}
+              wideLoadE={wideLoadE}
+              wideLoadDone={wideLoadDone}
+              settings={settings}
+              wideLoadResult={wideLoadState?.result ?? null}
+              impoundedResult={
+                sectionStates.find(s => s.id === "impounded")?.result ?? null
+              }
+              manualFields={manualFields}
+              updateManual={updateManual}
+              embeddedMode={true}
+              hswimUpload={hswimUpload} 
+            />
+          )}
+        </DailyReportView>
+      </div>
     );
   }
 
   return (
-    <div className="root">
+    <div className="app-shell">
       <Sidebar
         sectionStates={sectionStates}
-        activeId={activeId}
-        onSelect={setActiveId}
+        activeId={
+          activeId === "daily"
+            ? (sectionStates.find(s => DAILY_IDS.includes(s.id) && s.status === "success")?.id ?? "wide_load")
+            : activeId
+        }
+        onSelect={id => setActiveId(id === "settings" ? "settings" : "daily")}
         onGenerate={handleGenerate}
         canGenerate={canGenerate}
-        sections={SECTIONS}
       />
-      <main className="main-content">
-        {SECTIONS.map((section) =>
-          section.id === activeId ? renderSection(section) : null
-        )}
-      </main>
+
+      <div className="main-area">
+        <div className="topbar">
+          <div className="topbar-left">
+            <span className="topbar-title">
+              {activeId === "settings" ? "Settings" : "Daily Report"}
+            </span>
+            <span className="topbar-sub">
+              {activeId === "settings" ? "Weighbridge configuration" : "Upload & Generate"}
+            </span>
+          </div>
+          <div className="topbar-badges">
+            {sectionStates.filter(s => s.status === "success").length > 0 && (
+              <span className="badge badge-green">
+                {sectionStates.filter(s => s.status === "success").length} ready
+              </span>
+            )}
+            {settings?.direction && (
+              <span className="badge badge-blue">{settings.direction}</span>
+            )}
+          </div>
+        </div>
+
+        {renderMain()}
+      </div>
     </div>
   );
 }

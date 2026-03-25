@@ -1,9 +1,21 @@
-import { SECTIONS } from "../config/sections";
+import { useState } from "react";
+import { SECTIONS, GROUPS } from "../config/sections";
 
 /**
- * Sidebar navigation showing all sections and their upload status.
- * Settings tab has no status dot — it's always accessible.
+ * ANKA Reports — Sidebar
+ *
+ * Features:
+ *  - Collapsible groups: Daily Report / Mobile Report
+ *  - Status dots per section (success / uploading / error / idle)
+ *  - Ready count summary at bottom
+ *  - Generate button (disabled until canGenerate)
+ *  - System section (Settings) below a divider, no group header
  */
+
+
+
+
+
 export default function Sidebar({
   sectionStates,
   activeId,
@@ -11,87 +23,175 @@ export default function Sidebar({
   onGenerate,
   canGenerate,
 }) {
+  // Track which groups are open. Daily starts open, mobile starts closed.
+  const [openGroups, setOpenGroups] = useState({ daily: true, mobile: false });
+
+  function toggleGroup(id) {
+    setOpenGroups((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
   function getStatus(id) {
     return sectionStates.find((s) => s.id === id)?.status ?? "idle";
   }
 
-  function StatusDot({ status }) {
-    const colors = {
-      success:   "#28c840",
-      uploading: "#febc2e",
-      busy:      "#febc2e",
-      error:     "#ff5f57",
-      idle:      "#444",
-    };
+  const uploadSections = SECTIONS.filter((s) => !s.settings);
+  const readyCount = sectionStates.filter((s) => s.status === "success").length;
+
+  // Sections that belong to named groups (daily / mobile)
+  const groupedSections = (groupId) =>
+    SECTIONS.filter((s) => s.group === groupId);
+
+  // System-level sections (settings, etc.)
+  const systemSections = SECTIONS.filter((s) => s.group === "system");
+
+  function SidebarLogo() {
+  const [imgFailed, setImageFailed] = useState(false);
+
+  if (imgFailed) {
     return (
-      <span style={{
-        display: "inline-block", width: 8, height: 8,
-        borderRadius: "50%", background: colors[status] ?? colors.idle,
-        flexShrink: 0,
-      }} />
+      <>
+        <div className="sidebar-logo-mark">A</div>
+        <div className="sidebar-brand-text">
+            <span className="sidebar-brand-name">ANKA Reports</span>
+            <span className="sidebar-brand-sub">Weighbridge Portal</span>
+        </div>
+      </>
     );
   }
 
-  // Sections that have upload state (exclude settings)
-  const uploadSections = SECTIONS.filter(s => !s.settings);
-  const readyCount = sectionStates.filter(s => s.status === "success").length;
+    return (
+      <img
+        src="/logo.png"
+        alt="ANKA Logo"
+        className="sidebar-logo-img"
+        onError={() => setImageFailed(true)}
+      />
+    )
+  }
 
   return (
     <aside className="sidebar">
 
-      {/* App title */}
-      <div className="sidebar-top-bar">
-        <div className="sidebar-dots">
-          <span className="dot dot-red" />
-          <span className="dot dot-yellow" />
-          <span className="dot dot-green" />
-        </div>
-        <span className="sidebar-logo-text">ReportGen</span>
+      {/* ── Brand header ───────────────────────────────────── */}
+      <div className="sidebar-brand">
+        <SidebarLogo />
       </div>
 
-      <div className="sidebar-divider" />
-
-      {/* Section navigation */}
+      {/* ── Navigation ─────────────────────────────────────── */}
       <nav className="sidebar-nav">
-        {SECTIONS.map((section) => {
-          const isActive  = section.id === activeId;
-          const isSettings = !!section.settings;
+
+        {/* Grouped sections: Daily Report, Mobile Report */}
+        {GROUPS.map((group) => {
+          const sections = groupedSections(group.id);
+          if (sections.length === 0) return null;
+          const isOpen = !!openGroups[group.id];
 
           return (
-            <button
-              key={section.id}
-              className={`sidebar-nav-item ${isActive ? "sidebar-nav-item-active" : ""}`}
-              onClick={() => onSelect(section.id)}
-            >
-              <span className="sidebar-nav-label">
-                {/* gear icon for settings */}
-                {isSettings ? "⚙ " : ""}{section.title}
-              </span>
-              {/* no status dot for settings tab */}
-              {!isSettings && <StatusDot status={getStatus(section.id)} />}
-            </button>
+            <div key={group.id} className="sidebar-group">
+
+              {/* Group header — clickable to collapse */}
+              <button
+                className="sidebar-group-btn"
+                onClick={() => toggleGroup(group.id)}
+                aria-expanded={isOpen}
+              >
+                <span className="sidebar-group-label">{group.label}</span>
+                <span className={`sidebar-chevron ${isOpen ? "open" : ""}`}>
+                  ▶
+                </span>
+              </button>
+
+              {/* Children — shown when group is open */}
+              {isOpen && (
+                <div className="sidebar-group-children">
+                  {sections.map((section) => (
+                    <SidebarItem
+                      key={section.id}
+                      section={section}
+                      isActive={section.id === activeId}
+                      status={getStatus(section.id)}
+                      onClick={() => onSelect(section.id)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
           );
         })}
+
       </nav>
 
       <div style={{ flex: 1 }} />
 
-      <div className="sidebar-divider" />
+      {/* ── Footer: ready count + generate button ──────────── */}
+      <div className="sidebar-footer">
 
-      {/* Section readiness summary — counts upload sections only */}
-      <div className="sidebar-summary">
-        {readyCount} of {uploadSections.length} sections ready
+        {/* System divider + Settings */}
+        {systemSections.length > 0 && (
+          <>
+            <div className="sidebar-divider" />
+            {systemSections.map((section) => (
+              <SidebarItem
+                key={section.id}
+                section={section}
+                isActive={section.id === activeId}
+                status={null} // no status dot for settings
+                onClick={() => onSelect(section.id)}
+                isSystem
+              />
+            ))}
+          </>
+        )}
+
+
+        
+        <div className="sidebar-ready">
+          <StatusDot status={readyCount === uploadSections.length && readyCount > 0 ? "success" : "idle"} />
+          <span className="sidebar-ready-text">
+            {readyCount} of {uploadSections.length} sections ready
+          </span>
+        </div>
+
+        <button
+          className={`sidebar-generate-btn ${!canGenerate ? "disabled" : ""}`}
+          onClick={onGenerate}
+          disabled={!canGenerate}
+        >
+          {canGenerate ? "↓ Generate Report" : "⊘ No sections ready"}
+        </button>
       </div>
 
-      {/* Generate report button */}
-      <button
-        className={`sidebar-generate-btn ${!canGenerate ? "sidebar-generate-btn-disabled" : ""}`}
-        onClick={onGenerate}
-        disabled={!canGenerate}
-      >
-        {canGenerate ? "↓ Generate Report" : "⊘ No sections ready"}
-      </button>
-
     </aside>
+  );
+}
+
+// ── Sub-components ───────────────────────────────────────────
+
+function SidebarItem({ section, isActive, status, onClick, isSystem }) {
+  return (
+    <button
+      className={`sidebar-item ${isActive ? "active" : ""} ${isSystem ? "system" : ""}`}
+      onClick={onClick}
+    >
+      {isSystem && <span className="sidebar-item-icon">⚙</span>}
+      <span className="sidebar-item-label">{section.title}</span>
+      {status !== null && <StatusDot status={status} />}
+    </button>
+  );
+}
+
+function StatusDot({ status }) {
+  const colors = {
+    success:   "var(--status-success)",
+    uploading: "var(--status-warn)",
+    busy:      "var(--status-warn)",
+    error:     "var(--status-error)",
+    idle:      "var(--status-idle)",
+  };
+  return (
+    <span
+      className="status-dot"
+      style={{ background: colors[status] ?? colors.idle }}
+    />
   );
 }

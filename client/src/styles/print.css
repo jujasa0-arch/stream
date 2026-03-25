@@ -1,0 +1,57 @@
+@media print {
+  body * { visibility: hidden; }
+
+  #hswim-print-region,
+  #hswim-print-region * { visibility: visible; }
+
+  #hswim-print-region {
+    position: absolute !important;
+    top: 0;
+    left: 0;
+    width: 100%;
+  }
+
+  .page-wrapper {
+    position: relative;
+    width: 100% !important;
+
+    /* ✅ KEEP FIXED A4 HEIGHT */
+    height: 794px !important;
+    min-height: 794px !important;
+    max-height: 794px !important;
+
+    box-shadow: none !important;
+    margin: -5px 0 5px !important;
+
+    /* match React padding exactly */
+    padding: 12px 28px 10px!important;
+
+    box-sizing: border-box !important;
+
+    page-break-after: always;
+    /* break-after: page; */
+
+    overflow: hidden !important;
+  }
+
+  .page-wrapper:last-child {
+    page-break-after: avoid;
+    break-after: avoid;
+  }
+
+
+  .page-footer {
+    display: grid !important;
+    grid-template-columns: 1fr auto 1fr !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  @page {
+    size: A4 landscape;
+    margin: 0;
+    padding: 0;
+  }
+}
